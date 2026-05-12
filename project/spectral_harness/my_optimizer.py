@@ -66,7 +66,7 @@ class SpectralOptimizer(torch.optim.Optimizer):
         mode: Mode = "disabled",
         spectral_rank: int = 8,
         spectral_beta: float = 0.95,
-        correction_strength: float = 0.0,
+        correction_strength: float = 0.03,
     ) -> None:
         if mode not in ("disabled", "debug", "production"):
             raise ValueError(
@@ -108,6 +108,61 @@ class SpectralOptimizer(torch.optim.Optimizer):
 
         for group in self.param_groups:
             mode = group["mode"]
+
+            # Exact PyTorch AdamW path for disabled mode.
+            if mode == "disabled":
+                params_with_grad = []
+                grads = []
+                exp_avgs = []
+                exp_avg_sqs = []
+                max_exp_avg_sqs = []
+                state_steps = []
+
+                for p in group["params"]:
+                    if p.grad is None:
+                        continue
+
+                    state = self.state[p]
+
+                    if len(state) == 0:
+                        state["step"] = torch.zeros(())
+                        state["m"] = torch.zeros_like(p)
+                        state["v"] = torch.zeros_like(p)
+
+                    params_with_grad.append(p)
+                    grads.append(p.grad)
+                    exp_avgs.append(state["m"])
+                    exp_avg_sqs.append(state["v"])
+                    state_steps.append(state["step"])
+
+                if len(params_with_grad) > 0:
+                    beta1, beta2 = group["betas"]
+
+                    torch.optim._functional.adamw(
+                        params_with_grad,
+                        grads,
+                        exp_avgs,
+                        exp_avg_sqs,
+                        max_exp_avg_sqs,
+                        state_steps,
+                        foreach=True,
+                        capturable=False,
+                        differentiable=False,
+                        fused=False,
+                        grad_scale=None,
+                        found_inf=None,
+                        has_complex=False,
+                        amsgrad=False,
+                        beta1=beta1,
+                        beta2=beta2,
+                        lr=group["lr"],
+                        weight_decay=group["weight_decay"],
+                        eps=group["eps"],
+                        maximize=False,
+                    )
+
+                continue
+
             for p in group["params"]:
                 if p.grad is None:
                     continue
@@ -120,9 +175,7 @@ class SpectralOptimizer(torch.optim.Optimizer):
                 # AdamW direction is needed by all three modes.
                 d_t, m_hat, v_hat = _adamw_direction(p, state, group)
 
-                if mode == "disabled":
-                    update = d_t
-                elif mode == "debug":
+                if mode == "debug":
                     update = d_t
                     if p.dim() == 2:
                         diag = self._diagnostics_only(p, d_t, group, state)
@@ -138,7 +191,13 @@ class SpectralOptimizer(torch.optim.Optimizer):
                         )
                         update = update + correction
 
-                # AdamW step: theta <- theta - lr * (update + wd * theta)
+                        diag = state.get("last_diag")
+                        if diag is not None:
+                            for k in ("effective_rank", "cosine_with_adamw",
+                                      "spectral_correction_norm"):
+                                diag_acc[k] += diag.get(k, 0.0)
+                            diag_acc["n_tensors"] += 1
+
                 lr = group["lr"]
                 wd = group["weight_decay"]
                 if wd != 0.0:
@@ -188,11 +247,121 @@ class SpectralOptimizer(torch.optim.Optimizer):
         because (a) you should think about it before you use it and
         (b) any starter spectral choice would prejudge your hypothesis.
         """
-        raise NotImplementedError(
-            "Fill in _compute_spectral_correction with your spectral "
-            "update rule.  See the docstring and `_starter_low_rank_template` "
-            "for a safe scaffolding option.",
-        )
+        # Only apply spectral corrections to 2-D tensors.
+        if p.dim() != 2:
+            return torch.zeros_like(d_t)
+
+        with torch.no_grad():
+
+            # -----------------------------
+            # Hyperparameters
+            # -----------------------------
+            k = int(group["spectral_rank"])
+            strength = float(group["correction_strength"])
+            warmup_steps = 10
+
+            # -----------------------------
+            # Flatten AdamW direction
+            # -----------------------------
+            d_flat = d_t.reshape(-1)
+
+            norm_d = d_flat.norm()
+            if norm_d.item() == 0.0:
+                return torch.zeros_like(d_t)
+
+            x_t = d_flat / (norm_d + 1e-12)
+
+            # -----------------------------
+            # Initialize trajectory buffer
+            # -----------------------------
+            if "dir_buffer" not in state:
+                state["dir_buffer"] = []
+                state["traj_step"] = 0
+
+            buffer = state["dir_buffer"]
+
+            state["traj_step"] += 1
+            traj_step = state["traj_step"]
+
+            # -----------------------------
+            # Warmup phase
+            # -----------------------------
+            if len(buffer) == 0 or traj_step <= warmup_steps:
+
+                buffer.append(x_t.detach().clone())
+
+                if len(buffer) > k:
+                    buffer.pop(0)
+
+                state["last_diag"] = {
+                    "effective_rank": 1.0,
+                    "cosine_with_adamw": 1.0,
+                    "spectral_correction_norm": 0.0,
+                }
+
+                return torch.zeros_like(d_t)
+
+            # -----------------------------
+            # Persistent trajectory direction
+            # -----------------------------
+            B = torch.stack(buffer, dim=0)
+
+            phi = B.mean(dim=0)
+
+            phi_norm = phi.norm()
+
+            if phi_norm.item() == 0.0:
+
+                buffer.append(x_t.detach().clone())
+
+                if len(buffer) > k:
+                    buffer.pop(0)
+
+                state["last_diag"] = {
+                    "effective_rank": 1.0,
+                    "cosine_with_adamw": 1.0,
+                    "spectral_correction_norm": 0.0,
+                }
+
+                return torch.zeros_like(d_t)
+
+            phi = phi / (phi_norm + 1e-12)
+
+            # -----------------------------
+            # Norm-preserving angular correction
+            # -----------------------------
+            raw = x_t + strength * phi
+
+            y_t = raw / (raw.norm() + 1e-12)
+
+            correction_flat = norm_d * y_t - d_flat
+
+            correction = correction_flat.reshape_as(d_t)
+
+            # -----------------------------
+            # Diagnostics
+            # -----------------------------
+            cosine = torch.dot(x_t, y_t).item()
+
+            correction_norm = correction_flat.norm().item()
+
+            projected_energy = torch.dot(x_t, phi).pow(2).item()
+
+            state["last_diag"] = {
+                "effective_rank": projected_energy * k,
+                "cosine_with_adamw": cosine,
+                "spectral_correction_norm": correction_norm,
+            }
+
+            # -----------------------------
+            # Update trajectory buffer
+            # -----------------------------
+            buffer.append(x_t.detach().clone())
+
+            if len(buffer) > k:
+                buffer.pop(0)
+
+            return correction
 
     # ------------------------------------------------------------------ #
     # Diagnostics  (used by debug mode and your figures)

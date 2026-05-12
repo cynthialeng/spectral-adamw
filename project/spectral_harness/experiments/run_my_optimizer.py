@@ -22,7 +22,7 @@ from harness import ResidualMLP, derive_seeds, make_task_b, train  # noqa: E402
 from my_optimizer import SpectralOptimizer  # noqa: E402
 
 STUDENT_ID = "starter"  # replace with your student id when you copy this file
-MODE = "debug"          # "disabled" | "debug" | "production"
+MODE = "production"          # "disabled" | "debug" | "production"
 
 
 def main() -> None:
