@@ -16,6 +16,7 @@ env/
 .idea/
 
 # Compiled docs
+*.txt
 *.aux
 *.log
 *.out
@@ -34,8 +35,8 @@ project/spectral_harness/data/
 project/spectral_harness/runs/
 project/spectral_harness/figures/
 project/spectral_harness/*.json
-project/spectral_harness/**/*_telemetry.json
-project/spectral_harness/**/*.csv
+# project/spectral_harness/**/*_telemetry.json
+# project/spectral_harness/**/*.csv
 
 # OS
 .DS_Store
