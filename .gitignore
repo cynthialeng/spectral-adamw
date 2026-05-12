@@ -28,8 +28,8 @@ env/
 project/docs/*.pdf
 
 # Run artifacts (regenerated on every run)
-project/spectral_harness/logs/
-project/spectral_harness/telemetry/
+# project/spectral_harness/logs/
+# project/spectral_harness/telemetry/
 project/spectral_harness/data/
 project/spectral_harness/runs/
 project/spectral_harness/figures/
