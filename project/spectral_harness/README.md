@@ -4,9 +4,6 @@ A small, read-only scaffolding that lets you focus on the one file that
 matters: `my_optimizer.py`. Everything in `harness/` is fixed for the
 class so all student results are comparable.
 
-> The full assignment sheet (problem statement, rubric, rules) is
-> distributed separately by the instructor.
-
 ## Layout
 
     my_optimizer.py                ← your work lives here (and only here)
@@ -109,26 +106,3 @@ CSVs and the figure-generating script.
 - [ ] At least one diagnostic log proves your controller is **not silent**
 - [ ] `reproduce.sh` runs end-to-end in a short GPU session
 - [ ] Three pre-registered predictions in the report (one win, one loss, one failure)
-
-## Common traps
-
-- **Silent controller** — the most common pitfall. If your effective rank
-  is ≤ 1 or your realized angle is below noise, you have not implemented
-  a different optimizer; you have implemented AdamW with extra overhead.
-- **Boundary-grid win** — best lr is the largest or smallest tested
-  value. Extend the grid and re-run.
-- **Mixed CSVs** — if you run multiple jobs, include `optimizer` and
-  `seed` columns; the runner already does this.
-- **Bad timing** — never use `time.time()` for per-step claims. Use the
-  `CUDAEventTimer`.
-- **Layer flattening** — a spectral trick that "works" only because it
-  mixes unrelated tensors does not work.
-
-## What is NOT included on purpose
-
-- No SLURM batch scripts. Run locally; if you need a cluster, write your
-  own one-liner.
-- No production reference optimizer. Your starter mode is `disabled`;
-  the spectral correction is the assignment.
-- No 40-script research-grade orchestration. The four scripts in
-  `experiments/` cover the entire deliverable surface.
